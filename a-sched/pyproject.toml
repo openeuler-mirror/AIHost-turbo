@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "a_sched"
+version = "1.0.0"
+requires-python = ">=3.10"
+
+dependencies = [
+    "psutil>=5.0.0",
+    "argparse>=1.4.0"
+]
