@@ -454,6 +454,8 @@ class HierarchicalBalanceScheduler(Scheduler):
             print(f"no clusters for task group [{group.group_id}]")
             return False
         group.cluster = sorted(task_group_clusters)
+        if self.config.enable_cpuset:
+            group.cluster = group.cluster[:len(group.cluster) // 2]
 
         # update task group cpus
         for cluster_id in group.cluster:

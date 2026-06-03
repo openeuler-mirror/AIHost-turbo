@@ -239,6 +239,9 @@ class NpuTask(Task):
             print(f"get npu irq (name={self.trs_mbox_name}, id={self._trs_mbox_irq}) success.")
 
     def bind_cpu(self) -> None:
+        for task in self._bind_high_prio_thread:
+            task.bind_cpu()
+
         if self._acl_thread is not None and self._acl_thread_cpus:
             print(
                 f"binding npu[{self.task_id}] thread[{self._acl_thread}]({self.ACL_THREAD}) "
@@ -339,6 +342,11 @@ class NpuTask(Task):
             end = start + 1
             self._trs_mbox_irq_cpus = cpus[start:end]
             start = end
+
+    def get_all_threads(self) -> dict[int, list[int]]:
+        thread_list = [self._acl_thread, self._release_thread, self._rt_recycle_thread]
+        thread_list.extend([thread.task_id for thread in self._bind_high_prio_thread])
+        return {self._bind_pid: [tid for tid in thread_list if tid is not None]}
 
     def __str__(self) -> str:
         npu_str = ""
@@ -464,6 +472,18 @@ class TaskGroup:
         for _, npu in self.npu_tasks.items():
             high_prio_tasks.append(npu)
         return high_prio_tasks
+
+    def get_high_prio_threads(self) -> dict[int, list[int]]:
+        high_prio_threads = defaultdict(list)
+        for tid, thread in self.thread_tasks.items():
+            if thread.priority == PriorityLevel.HIGH and thread.bind_npu is None:
+                pid = utils.get_thread_pid_by_tid(tid)
+                high_prio_threads[pid].append(tid)
+        for npu in self.npu_tasks.values():
+            npu_threads = npu.get_all_threads()
+            for pid, threads in npu_threads.items():
+                high_prio_threads[pid].extend(threads)
+        return high_prio_threads
 
     def __str__(self) -> str:
         return (
