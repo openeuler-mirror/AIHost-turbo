@@ -20,7 +20,7 @@ class AffinityEngine:
         self.task = TaskManager()
         self.domain = AffinityDomainManager(config=self.config)
         self.cpuset = CpusetManager(config=self.config, task=self.task, domain=self.domain)
-        self.backup = AffinityBackup(task=self.task, domain=self.domain)
+        self.backup = AffinityBackup(task=self.task, domain=self.domain, cpuset=self.cpuset)
 
     def run(self, dry_run: bool = False) -> None:
         """
