@@ -4,6 +4,7 @@ import json
 import os
 from datetime import datetime
 
+from a_sched.cpuset import CpusetManager
 from a_sched.task import TaskManager
 from a_sched.affinity_domain import AffinityDomainManager
 import a_sched.utils as utils
@@ -16,13 +17,15 @@ AFFINITY_BACKUP_FILE_SUFFIX = ".json"
 class AffinityBackup:
     """亲和信息备份恢复"""
 
-    def __init__(self, task: TaskManager, domain: AffinityDomainManager):
+    def __init__(self, task: TaskManager, domain: AffinityDomainManager, cpuset: CpusetManager):
         self._task = task
         self._domain = domain
+        self._cpuset = cpuset
 
     def backup_affinity(self) -> None:
         affinity_data = {
             "cpu_bind_data": self.build_cpu_bind_data(),
+            "cpuset_data": self._cpuset.get_backup_data(),
             "background_bind_data": self.build_background_bind_data(),
             "irq_bind_data": self.build_irq_bind_data(),
             "irq_service_status": self.build_irq_service_status(),
@@ -160,6 +163,7 @@ class AffinityBackup:
             return
 
         # 3. 批量恢复
+        self._cpuset.restore_cpuset(saved_data.get("cpuset_data", {}))
         self.restore_cpu_bind_data(saved_data.get("cpu_bind_data", {}))
         self.restore_irq_bind_data(saved_data.get("irq_bind_data", {}))
         self.restore_irq_service_status(saved_data.get("irq_service_status", False))

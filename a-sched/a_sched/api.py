@@ -171,3 +171,10 @@ def set_exclude_cpu(cpu_str: str) -> None:
         cpu_str: 字符串格式的cpu列表，示例：0-3, 10, 20
     """
     affinity.config.set_exclude_cpu(cpu_str=cpu_str)
+
+
+def enable_cpuset_isolate(enable: bool = True) -> None:
+    """
+    启用/关闭 cpuset隔离
+    """
+    affinity.config.enable_cpuset = enable

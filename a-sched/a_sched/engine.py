@@ -1,4 +1,5 @@
 from a_sched.affinity_domain import AffinityDomainManager
+from a_sched.cpuset import CpusetManager
 from a_sched.task import TaskManager
 from a_sched.backup import AffinityBackup
 from a_sched.config import AffinityConfig
@@ -18,6 +19,7 @@ class AffinityEngine:
         self.config = AffinityConfig()
         self.task = TaskManager()
         self.domain = AffinityDomainManager(config=self.config)
+        self.cpuset = CpusetManager(config=self.config, task=self.task, domain=self.domain)
         self.backup = AffinityBackup(task=self.task, domain=self.domain)
 
     def run(self, dry_run: bool = False) -> None:
@@ -100,9 +102,17 @@ class AffinityEngine:
     def _bind_cpus(self) -> None:
         print("\nStarting bind cpus...")
 
-        # 绑定亲和组任务
-        for _, group in self.task.groups.items():
-            for task in group.get_all_tasks():
+        # 绑定普通亲和组任务
+        for group in self.task.groups.values():
+            for task in group.get_normal_prio_tasks():
+                task.bind_cpu()
+
+        # 动态隔离高优先级任务绑定的cpu
+        self._isolate_cpus()
+
+        # 绑定高优先级亲和组任务
+        for group in self.task.groups.values():
+            for task in group.get_high_prio_tasks():
                 task.bind_cpu()
 
         # 绑定背景任务
@@ -134,6 +144,14 @@ class AffinityEngine:
             f"[BackgroundTask] Bind {bound}/{total} processes to CPUs {utils.compress_continuous(normal_cpus)}"
             f" (failed: {len(failed)})"
         )
+
+    def _isolate_cpus(self) -> None:
+        isolate_cpus = []
+        shared_cpus = []
+        for group in self.task.groups.values():
+            isolate_cpus.extend(group.isolate_cpus.to_list())
+            shared_cpus.extend(group.cpus.to_list())
+        self.cpuset.isolate_cpus(isolate_cpus, shared_cpus)
 
     def _bind_memory(self) -> None:
         print("\nStarting bind memory...")

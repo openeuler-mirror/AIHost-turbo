@@ -420,6 +420,42 @@ def safe_listdir(path: str) -> list:
         return []
 
 
+def create_dir(root_dir, name) -> bool:
+    path = os.path.join(root_dir, name)
+    if not os.path.exists(path):
+        try:
+            os.mkdir(path)
+        except Exception as e:
+            print(f"error: failed to create dir {path} -> {e}")
+            return False
+    print(f"success to create dir -> {path}")
+    return True
+
+
+def remove_dir(root_dir, name) -> bool:
+    path = os.path.join(root_dir, name)
+    if os.path.exists(path):
+        try:
+            os.rmdir(path)
+        except Exception as e:
+            print(f"error: failed to remove dir {path} -> {e}")
+            return False
+    print(f"success to remove dir -> {path}")
+    return True
+
+
+def write_str_param(root_dir, name, value) -> bool:
+    path = os.path.join(root_dir, name)
+    try:
+        with open(path, "w") as file:
+            file.write(value)
+    except Exception as e:
+        print(f"error: failed to write {value} to {path} -> {e}")
+        return False
+    print(f"success to write {value} to {path}")
+    return True
+
+
 def read_str_param(root_dir, name) -> tuple[str, bool]:
     path = os.path.join(root_dir, name)
     try:
