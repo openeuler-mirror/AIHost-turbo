@@ -86,7 +86,7 @@ class HierarchicalBalanceScheduler(Scheduler):
     def _get_task_groups_to_schedule(self) -> None:
         groups_to_schedule: list[int] = []
         for group_id, group in self.task.groups.items():
-            if group.get_all_tasks_num() != 0:
+            if group.all_tasks_num != 0:
                 groups_to_schedule.append(group_id)
         self._schedule_task_groups = groups_to_schedule
 
@@ -506,7 +506,7 @@ class HierarchicalBalanceScheduler(Scheduler):
 
     def _get_tasks_to_schedule_for_group(self, group: TaskGroup) -> list[Task]:
         schedule_tasks: list[Task] = []
-        for task in group.get_all_tasks():
+        for task in group.all_tasks:
             if task.cpus.count() == 0:  # cpu尚未分配
                 schedule_tasks.append(task)
         return schedule_tasks
@@ -551,7 +551,7 @@ class HierarchicalBalanceScheduler(Scheduler):
 
         used_numas = set()
         for _, group in self.task.groups.items():
-            for task in group.get_all_tasks():
+            for task in group.all_tasks:
                 if task.numa:
                     used_numas.update(task.numa)
         all_numas = set(self.domain.get_all_numas_id())

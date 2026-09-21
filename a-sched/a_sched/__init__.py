@@ -11,6 +11,7 @@ from a_sched.api import (
     print_affinity,
     restore_affinity,
     set_exclude_cpu,
+    enable_cpuset_isolate,
 )
 
 __version__ = "0.1.0"
@@ -27,4 +28,5 @@ __all__ = [
     "print_affinity",
     "restore_affinity",
     "set_exclude_cpu",
+    "enable_cpuset_isolate",
 ]

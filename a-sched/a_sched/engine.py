@@ -17,8 +17,8 @@ class AffinityEngine:
 
     def _init_engine(self) -> None:
         self.config = AffinityConfig()
-        self.task = TaskManager()
         self.domain = AffinityDomainManager(config=self.config)
+        self.task = TaskManager(domain=self.domain)
         self.cpuset = CpusetManager(config=self.config, task=self.task, domain=self.domain)
         self.backup = AffinityBackup(task=self.task, domain=self.domain, cpuset=self.cpuset)
 
@@ -33,11 +33,19 @@ class AffinityEngine:
         print("\n-------------------------- Affinity Schedule Begin --------------------------")
 
         try:
+            self._check_device()
+
             print("\nStarting build affinity domain...")
             self.domain.build_affinity_domain()
 
             print("The affinity domain is as follows:")
             self._print_affinity_domain()
+
+            print("\nStarting init npu...")
+            self.task.init_npu()
+
+            print("\nStarting scan backgound task...")
+            self.task.scan_background_tasks()
 
             print("\nThe affinity info before schedule is as follows:")
             self.print_affinity()
@@ -66,9 +74,6 @@ class AffinityEngine:
         # 刷新高优先级线程和npu互相绑定关系
         self.task.update_high_prio_thread_bind_npu()
 
-        # 扫描背景任务
-        self.task.scan_background_tasks()
-
         # 使用分层均衡亲和调度策略决策亲和方案
         self._scheduler = HierarchicalBalanceScheduler(self.config, self.domain, self.task)
         if not self._scheduler.schedule():
@@ -91,6 +96,13 @@ class AffinityEngine:
     def _print_affinity_plan(self) -> None:
         print("-------------------------------- Affinity Plan --------------------------------")
         self.task.print_all()
+
+    def _check_device(self) -> None:
+        device = utils.get_ascend_device_type()
+        if device == utils.AscendDeviceType.UNKNOWN:
+            raise RuntimeError("Can not detect ascend device type")
+        if device not in (utils.AscendDeviceType.A3, utils.AscendDeviceType.A5):
+            raise RuntimeError(f"Unsupported ascend device type [{device}], support A3/A5 only")
 
     def _stop_irq_balance(self) -> None:
         print("\nStopping irqbalance service...")
@@ -177,7 +189,7 @@ class AffinityEngine:
         """打印亲和任务中进程/线程当前实际的亲和信息"""
 
         print("--------------------------- Current Affinity Status ---------------------------")
-        self.backup.print_affinity()
+        self.task.print_actual_affinity()
 
     def backup_affinity(self) -> None:
         """备份亲和任务中进程/线程当前亲和信息"""
