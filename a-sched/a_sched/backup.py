@@ -5,7 +5,7 @@ import os
 from datetime import datetime
 
 from a_sched.cpuset import CpusetManager
-from a_sched.task import TaskManager
+from a_sched.task import NpuTaskA3, TaskManager
 from a_sched.affinity_domain import AffinityDomainManager
 import a_sched.utils as utils
 
@@ -84,14 +84,9 @@ class AffinityBackup:
         irq_bind_data = {}
         for group in self._task.groups.values():
             for npu in group.npu_tasks.values():
-                irqs = []
-                if npu._sq_irq is not None:
-                    irqs.append((npu._sq_irq, npu.SQ_IRQ))
-                for cq in npu._cq_irqs:
-                    irqs.append((cq, npu.CQ_IRQ))
-                if npu._trs_mbox_irq is not None:
-                    irqs.append((npu._trs_mbox_irq, npu.trs_mbox_name))
-                for irq_id, irq_name in irqs:
+                if not isinstance(npu, NpuTaskA3):
+                    continue
+                for irq_id, irq_name in npu.irqs:
                     try:
                         irq_bind_data[irq_id] = {
                             "irq_id": irq_id,
@@ -120,26 +115,11 @@ class AffinityBackup:
         dev_sq_bind_data = {}
         for group in self._task.groups.values():
             for npu_id, npu in group.npu_tasks.items():
-                entry = {"npu_id": npu_id}
-                if npu._dev_sq_task is not None:
-                    try:
-                        entry["dev_sq_task"] = {
-                            "pid": npu._dev_sq_task,
-                            "name": npu.dev_sq_task_name,
-                            "cpu_affinity": utils.get_process_cpus_by_pid(pid=npu._dev_sq_task),
-                        }
-                    except Exception as e:
-                        print(f"npu[{npu_id}] {npu.dev_sq_task_name} get cpu affinity failed, {str(e)}")
-                if npu._dev_sq_send_wq is not None:
-                    try:
-                        entry["dev_sq_send_wq"] = {
-                            "wq_name": npu.dev_sq_send_wq_name,
-                            "cpu_affinity": utils.get_npu_work_queue_cpus_by_name(wq_name=npu.dev_sq_send_wq_name),
-                        }
-                    except Exception as e:
-                        print(f"npu[{npu_id}] {npu.dev_sq_send_wq_name} get cpu affinity failed, {str(e)}")
-                if len(entry) > 1:
-                    dev_sq_bind_data[npu_id] = entry
+                if not isinstance(npu, NpuTaskA3):
+                    continue
+                bind_data = npu.build_dev_bind_data()
+                if bind_data:
+                    dev_sq_bind_data[npu_id] = bind_data
         return dev_sq_bind_data
 
     def restore_affinity(self) -> None:

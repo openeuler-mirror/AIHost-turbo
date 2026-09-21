@@ -3,6 +3,7 @@ import os
 import re
 import psutil
 import subprocess
+from enum import Enum
 
 
 class CPUMask:
@@ -379,8 +380,8 @@ def get_all_user_processes() -> list[tuple[int, str]]:
                 if None in (pid, name, ppid):
                     continue
 
-                # 内核进程过滤
-                if pid == 0 or pid == 2 or ppid == 2:
+                # 过滤内核进程和用户态根进程
+                if pid in (0, 1, 2) or ppid == 2:
                     continue
 
                 all_processes.append((pid, name))
@@ -587,9 +588,8 @@ def get_npu_irq_by_name(irq_name: str, npu_id: int) -> list:
         print(f"get interrupts (name={irq_name}) fail - {e}")
         return []
 
-    # todo: 支持npu type获取
-    npu_type = "A3"
-    if npu_type == "A3":
+    npu_type = get_ascend_device_type()
+    if npu_type == AscendDeviceType.A3:
         card_id = npu_id // 2
         chip_id = npu_id % 2
         info, _, _ = execute_command(["npu-smi", "info", "-t", "board", "-i", str(card_id), "-c", str(chip_id)])
@@ -678,3 +678,64 @@ def is_cpu_online(cpu_id: int) -> bool:
     except Exception as e:
         print(f"Warning: check cpu{cpu_id} online status failed - {e}")
         return True
+
+
+def get_value_from_lines(lines: list[str], key: str) -> str:
+    for line in lines:
+        line = " ".join(line.split())
+        if key in line:
+            return line.split(":")[-1].strip()
+    return ""
+
+
+class AscendDeviceType(Enum):
+    UNKNOWN = 0
+    A2 = 1
+    A3 = 2
+    A5 = 3
+
+
+_ascend_device_type = None
+
+
+def detect_ascend_device_type() -> AscendDeviceType:
+    try:
+        npu_info_lines = subprocess.check_output(["npu-smi", "info", "-l"]).decode().strip().split("\n")
+        npu_id = int(get_value_from_lines(npu_info_lines, "NPU ID"))
+        board_info_lines = (
+            subprocess.check_output(["npu-smi", "info", "-t", "board", "-i", str(npu_id)])
+            .decode()
+            .strip()
+            .split("\n")
+        )
+
+        chip_name = get_value_from_lines(board_info_lines, "Chip Name")
+        if not chip_name:
+            chip_info_lines = (
+                subprocess.check_output(["npu-smi", "info", "-t", "board", "-i", str(npu_id), "-c", "0"])
+                .decode()
+                .strip()
+                .split("\n")
+            )
+        else:
+            chip_info_lines = board_info_lines
+
+        chip_name = get_value_from_lines(chip_info_lines, "Chip Name")
+        chip_type = get_value_from_lines(chip_info_lines, "Chip Type")
+        if "910" in chip_name:
+            return AscendDeviceType.A2 if chip_type else AscendDeviceType.A3
+        if "950" in chip_name:
+            return AscendDeviceType.A5
+        raise ValueError(f"Unable to recognize chip name: {chip_name}")
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(f"Get chip info failed: {error}") from error
+    except FileNotFoundError:
+        print("npu-smi command not found, if this is an npu envir, please check if npu driver is installed correctly.")
+        return AscendDeviceType.UNKNOWN
+
+
+def get_ascend_device_type() -> AscendDeviceType:
+    global _ascend_device_type
+    if _ascend_device_type is None:
+        _ascend_device_type = detect_ascend_device_type()
+    return _ascend_device_type
