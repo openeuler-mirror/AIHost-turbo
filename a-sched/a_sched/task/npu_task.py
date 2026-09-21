@@ -315,7 +315,7 @@ class NpuTaskA3(NpuTask):
                 f"cpu={utils.compress_continuous(self._acl_thread_cpus)}"
             )
         if self._release_thread is not None:
-            (
+            print(
                 f"    - Thread[{self._release_thread}]({RELEASE_THREAD}): "
                 f"cpu={utils.compress_continuous(self._release_thread_cpus)}"
             )

@@ -151,6 +151,7 @@ class AffinityDomainBuilder:
     def _read_cpu(self) -> None:
         cpu_root_dir = "/sys/devices/system/cpu/"
         cpu_pattern = re.compile(r"^cpu(\d+)$")
+        seen_core_ids: set[int] = set()
 
         for entry in utils.safe_listdir(cpu_root_dir):
             match = cpu_pattern.match(entry)
@@ -173,6 +174,14 @@ class AffinityDomainBuilder:
                 physical_package_id=utils.read_int_param(topology_dir, "physical_package_id"),
                 cluster_id=utils.read_int_param(topology_dir, "cluster_id"),
             )
+
+            core_id = utils.read_int_param(topology_dir, "core_id")
+            if core_id == -1:
+                core_id = cpu_id
+            if core_id in seen_core_ids:
+                continue
+            seen_core_ids.add(core_id)
+
             self._cpu_dict[cpu_id] = cpu_core
 
     def _read_numa(self) -> None:
