@@ -19,6 +19,7 @@ from a_sched.utils import AscendDeviceType
 class TestTaskPackage(unittest.TestCase):
     def test_cpuset_api_remains_public(self):
         self.assertTrue(callable(a_sched.enable_cpuset_isolate))
+        self.assertTrue(callable(a_sched.set_isolate_strategy))
 
     def test_task_manager_accepts_affinity_domain(self):
         domain = AffinityDomainManager(config=AffinityConfig())

@@ -4,7 +4,7 @@ from a_sched.task import TaskManager
 from a_sched.backup import AffinityBackup
 from a_sched.config import AffinityConfig
 from a_sched.scheduler import Scheduler
-from a_sched.strategy.hierarchical_balance import HierarchicalBalanceScheduler
+from a_sched.strategy import SchedulerFactory
 import a_sched.utils as utils
 
 
@@ -75,9 +75,8 @@ class AffinityEngine:
         self.task.update_high_prio_thread_bind_npu()
 
         # 使用分层均衡亲和调度策略决策亲和方案
-        self._scheduler = HierarchicalBalanceScheduler(self.config, self.domain, self.task)
-        if not self._scheduler.schedule():
-            raise RuntimeError("Plan affinity failed!")
+        self._scheduler = SchedulerFactory.create(config=self.config, domain=self.domain, task=self.task)
+        self._scheduler.schedule()
 
     def _execute(self) -> None:
         # 执行前先备份当前亲和信息

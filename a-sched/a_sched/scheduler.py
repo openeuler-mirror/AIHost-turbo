@@ -14,5 +14,5 @@ class Scheduler(ABC):
         self.task = task
 
     @abstractmethod
-    def schedule(self) -> bool:
-        return True
+    def schedule(self) -> None:
+        pass

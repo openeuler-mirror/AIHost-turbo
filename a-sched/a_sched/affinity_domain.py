@@ -300,8 +300,11 @@ class AffinityDomainManager:
                 return numa
         return None
 
-    def get_all_numas_id(self) -> list:
-        numa_list: list = []
+    def get_all_sockets_id(self) -> list[int]:
+        return [socket.domain_id for socket in self.socket_domains]
+
+    def get_all_numas_id(self) -> list[int]:
+        numa_list: list[int] = []
         for numa in self.numa_domains:
             numa_list.append(numa.domain_id)
         return numa_list
@@ -362,3 +365,39 @@ class AffinityDomainManager:
                     cluster_list.append(cluster.domain_id)
                     break
         return sorted(set(cluster_list))
+
+    def get_numas_of_clusters(self, clusters: list[int]) -> list[int]:
+        numas: list[int] = []
+        for numa in self.numa_domains:
+            if any(cluster in numa.get_all_children_id() for cluster in clusters):
+                numas.append(numa.domain_id)
+        return numas
+
+    def get_sockets_of_clusters(self, clusters: list[int]) -> list[int]:
+        numas = self.get_numas_of_clusters(clusters)
+        sockets: list[int] = []
+        for socket in self.socket_domains:
+            if any(numa in socket.get_all_children_id() for numa in numas):
+                sockets.append(socket.domain_id)
+        return sockets
+
+    def get_cluster_cpu_size(self) -> int:
+        if not self.cluster_domains:
+            return 0
+        return max(cluster.cpus.count() for cluster in self.cluster_domains)
+
+    def get_cpus_of_clusters(self, clusters: list[int]) -> list[int]:
+        cpus: list[int] = []
+        for cluster_id in clusters:
+            cluster = self.get_cluster_domain(cluster_id=cluster_id)
+            if cluster is not None:
+                cpus.extend(cluster.cpus.to_list())
+        return sorted(cpus)
+
+    def get_cpus_of_numas(self, numas: list[int]) -> list[int]:
+        cpus: list[int] = []
+        for numa_id in numas:
+            numa = self.get_numa_domain(numa_id=numa_id)
+            if numa is not None:
+                cpus.extend(numa.cpus.to_list())
+        return sorted(cpus)

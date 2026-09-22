@@ -12,6 +12,7 @@ from a_sched.api import (
     restore_affinity,
     set_exclude_cpu,
     enable_cpuset_isolate,
+    set_isolate_strategy,
 )
 
 __version__ = "0.1.0"
@@ -29,4 +30,5 @@ __all__ = [
     "restore_affinity",
     "set_exclude_cpu",
     "enable_cpuset_isolate",
+    "set_isolate_strategy",
 ]

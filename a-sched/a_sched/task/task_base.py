@@ -37,7 +37,6 @@ class Task(ABC):
         self.socket: list[int] = []  # 调度到的socket
         self.numa: list[int] = []  # 调度到的numa
         self.cluster: list[int] = []  # 调度到的cluster
-        self.do_isolate: bool = False  # 是否做了隔离调度
 
         self._type_names = {
             TaskType.THREAD: "THREAD",
@@ -55,9 +54,8 @@ class Task(ABC):
     def min_cpu(self) -> int:
         return 1
 
-    @property
-    def min_cluster(self) -> int:
-        return 1
+    def set_cpu(self, cpus: list[int]) -> None:
+        self.cpus = utils.CPUMask().from_list(cpus)
 
     @abstractmethod
     def assign_cpu(self, cpus: list[int]) -> None:
