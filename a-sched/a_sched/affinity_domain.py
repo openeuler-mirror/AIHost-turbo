@@ -153,11 +153,14 @@ class AffinityDomainBuilder:
         cpu_pattern = re.compile(r"^cpu(\d+)$")
         seen_core_ids: set[int] = set()
 
+        cpu_ids = []
         for entry in utils.safe_listdir(cpu_root_dir):
             match = cpu_pattern.match(entry)
-            if not match:
-                continue
-            cpu_id = int(match.group(1))
+            if match:
+                cpu_ids.append(int(match.group(1)))
+
+        # 按 CPU ID 排序后去重，确保每个物理核保留编号最小的逻辑核
+        for cpu_id in sorted(cpu_ids):
 
             # 过滤掉不可用的cpu
             if not self._is_cpu_available(cpu_id):
