@@ -153,11 +153,14 @@ class AffinityDomainBuilder:
         cpu_pattern = re.compile(r"^cpu(\d+)$")
         seen_core_ids: set[int] = set()
 
+        cpu_ids = []
         for entry in utils.safe_listdir(cpu_root_dir):
             match = cpu_pattern.match(entry)
-            if not match:
-                continue
-            cpu_id = int(match.group(1))
+            if match:
+                cpu_ids.append(int(match.group(1)))
+
+        # 按 CPU ID 排序后去重，确保每个物理核保留编号最小的逻辑核
+        for cpu_id in sorted(cpu_ids):
 
             # 过滤掉不可用的cpu
             if not self._is_cpu_available(cpu_id):
@@ -297,8 +300,11 @@ class AffinityDomainManager:
                 return numa
         return None
 
-    def get_all_numas_id(self) -> list:
-        numa_list: list = []
+    def get_all_sockets_id(self) -> list[int]:
+        return [socket.domain_id for socket in self.socket_domains]
+
+    def get_all_numas_id(self) -> list[int]:
+        numa_list: list[int] = []
         for numa in self.numa_domains:
             numa_list.append(numa.domain_id)
         return numa_list
@@ -359,3 +365,39 @@ class AffinityDomainManager:
                     cluster_list.append(cluster.domain_id)
                     break
         return sorted(set(cluster_list))
+
+    def get_numas_of_clusters(self, clusters: list[int]) -> list[int]:
+        numas: list[int] = []
+        for numa in self.numa_domains:
+            if any(cluster in numa.get_all_children_id() for cluster in clusters):
+                numas.append(numa.domain_id)
+        return numas
+
+    def get_sockets_of_clusters(self, clusters: list[int]) -> list[int]:
+        numas = self.get_numas_of_clusters(clusters)
+        sockets: list[int] = []
+        for socket in self.socket_domains:
+            if any(numa in socket.get_all_children_id() for numa in numas):
+                sockets.append(socket.domain_id)
+        return sockets
+
+    def get_cluster_cpu_size(self) -> int:
+        if not self.cluster_domains:
+            return 0
+        return max(cluster.cpus.count() for cluster in self.cluster_domains)
+
+    def get_cpus_of_clusters(self, clusters: list[int]) -> list[int]:
+        cpus: list[int] = []
+        for cluster_id in clusters:
+            cluster = self.get_cluster_domain(cluster_id=cluster_id)
+            if cluster is not None:
+                cpus.extend(cluster.cpus.to_list())
+        return sorted(cpus)
+
+    def get_cpus_of_numas(self, numas: list[int]) -> list[int]:
+        cpus: list[int] = []
+        for numa_id in numas:
+            numa = self.get_numa_domain(numa_id=numa_id)
+            if numa is not None:
+                cpus.extend(numa.cpus.to_list())
+        return sorted(cpus)

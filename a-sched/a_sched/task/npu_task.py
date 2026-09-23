@@ -89,13 +89,6 @@ class NpuTaskA3(NpuTask):
         return need_cpu
 
     @property
-    def min_cluster(self) -> int:
-        CPUS_PER_CLUSTER = 4
-        base = self.min_cpu // CPUS_PER_CLUSTER
-        extra = self.min_cpu % CPUS_PER_CLUSTER
-        return base + 1 if extra > 0 else base
-
-    @property
     def processes(self) -> list[int]:
         procs = []
         if self._dev_sq_task is not None:
@@ -247,13 +240,14 @@ class NpuTaskA3(NpuTask):
             utils.bind_npu_sq_send_wq_to_cpus(npu_id=self.task_id, cpus=self._dev_sq_send_wq_cpus)
 
     def assign_cpu(self, cpus: list[int]) -> None:
-        self.cpus.set_list(cpus)
+        if not cpus:
+            raise RuntimeError(f"[Error] assign cpu for npu[{self.task_id}] fail, invalid cpu")
+
+        self.cpus = utils.CPUMask().from_list(cpus)
         cpu_num = len(cpus)
         if cpu_num < self.min_cpu:
-            print(
-                f"[Error] assign cpu for npu[{self.task_id}] fail, "
-                f"no enough cpus, assigned {cpu_num}, need {self.min_cpu}"
-            )
+            print(f"[Warning] no enough cpus for npu[{self.task_id}], assigned {cpu_num}, need {self.min_cpu}")
+            self.set_cpu(cpus=cpus)
             return
 
         start = 0
@@ -296,6 +290,33 @@ class NpuTaskA3(NpuTask):
             end = start + 1
             self._trs_mbox_irq_cpus = cpus[start:end]
             start = end
+
+    def set_cpu(self, cpus: list[int]) -> None:
+        if not cpus:
+            raise RuntimeError(f"[Error] set cpu for npu[{self.task_id}] fail, invalid cpu")
+
+        self.cpus = utils.CPUMask().from_list(cpus)
+        for thread in self.bind_high_prio_thread:
+            thread.assign_cpu(cpus)
+            thread.socket = list(self.socket)
+            thread.numa = list(self.numa)
+            thread.cluster = list(self.cluster)
+        if self._acl_thread is not None:
+            self._acl_thread_cpus = cpus
+        if self._release_thread is not None:
+            self._release_thread_cpus = cpus
+        if self._rt_recycle_thread is not None:
+            self._rt_recycle_thread_cpus = cpus
+        if self._dev_sq_task is not None:
+            self._dev_sq_task_cpus = cpus
+        if self._dev_sq_send_wq is not None:
+            self._dev_sq_send_wq_cpus = cpus
+        if self._sq_irq is not None:
+            self._sq_irq_cpus = cpus
+        if self._cq_irqs is not None:
+            self._cq_irqs_cpus = cpus
+        if self._trs_mbox_irq is not None:
+            self._trs_mbox_irq_cpus = cpus
 
     def print(self) -> None:
         print(f"  - {self}")
@@ -455,13 +476,6 @@ class NpuTaskA5(NpuTask):
         need_cpu += len(self.bind_high_prio_thread)
         return need_cpu
 
-    @property
-    def min_cluster(self) -> int:
-        CPUS_PER_CLUSTER = 8
-        base = self.min_cpu // CPUS_PER_CLUSTER
-        extra = self.min_cpu % CPUS_PER_CLUSTER
-        return base + 1 if extra > 0 else base
-
     def _get_npu_threads(self) -> None:
         print(f"Starting get npu[{self.task_id}] threads...")
 
@@ -512,13 +526,14 @@ class NpuTaskA5(NpuTask):
             utils.bind_thread_to_cpus(tid=self._rt_recycle_thread, cpus=self._rt_recycle_thread_cpus)
 
     def assign_cpu(self, cpus: list[int]) -> None:
-        self.cpus.set_list(cpus)
+        if not cpus:
+            raise RuntimeError(f"[Error] assign cpu for npu[{self.task_id}] fail, invalid cpu")
+
+        self.cpus = utils.CPUMask().from_list(cpus)
         cpu_num = len(cpus)
         if cpu_num < self.min_cpu:
-            print(
-                f"[Error] assign cpu for npu[{self.task_id}] fail, "
-                f"no enough cpus, assigned {cpu_num}, need {self.min_cpu}"
-            )
+            print(f"[Warning] no enough cpus for npu[{self.task_id}], assigned {cpu_num}, need {self.min_cpu}")
+            self.set_cpu(cpus=cpus)
             return
 
         start = 0
@@ -541,6 +556,23 @@ class NpuTaskA5(NpuTask):
             thread.numa = list(self.numa)
             thread.cluster = list(self.cluster)
             start = end
+
+    def set_cpu(self, cpus: list[int]) -> None:
+        if not cpus:
+            raise RuntimeError(f"[Error] set cpu for npu[{self.task_id}] fail, invalid cpu")
+
+        self.cpus = utils.CPUMask().from_list(cpus)
+        for thread in self.bind_high_prio_thread:
+            thread.assign_cpu(cpus)
+            thread.socket = list(self.socket)
+            thread.numa = list(self.numa)
+            thread.cluster = list(self.cluster)
+        if self._acl_thread is not None:
+            self._acl_thread_cpus = cpus
+        if self._release_thread is not None:
+            self._release_thread_cpus = cpus
+        if self._rt_recycle_thread is not None:
+            self._rt_recycle_thread_cpus = cpus
 
     def print(self) -> None:
         print(f"  - {self}")

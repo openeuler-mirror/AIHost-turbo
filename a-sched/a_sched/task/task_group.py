@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from collections import defaultdict
 
 from a_sched.task.task_base import Task, PriorityLevel

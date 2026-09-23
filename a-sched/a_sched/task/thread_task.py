@@ -16,9 +16,8 @@ class ThreadTask(Task):
 
     def assign_cpu(self, cpus: list[int]) -> None:
         if not cpus:
-            print(f"[Error] assign cpu for thread[{self.task_id}](name={self.name}) fail, cpus={cpus}")
-            return
-        self.cpus.set_list(cpus[:1])
+            raise RuntimeError(f"[Error] assign cpu for thread[{self.task_id}](name={self.name}) fail, invalid cpu")
+        self.cpus = utils.CPUMask().from_list(cpus[:1])
 
     def print_actual_affinity(self, domain: AffinityDomainManager) -> None:
         priority = self._priority_names.get(self.priority, "UNKNOWN")

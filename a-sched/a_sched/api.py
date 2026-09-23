@@ -178,3 +178,8 @@ def enable_cpuset_isolate(enable: bool = True) -> None:
     启用/关闭 cpuset隔离
     """
     affinity.config.enable_cpuset = enable
+
+
+def set_isolate_strategy(isolate: str) -> None:
+    """设置高优先级任务隔离策略。"""
+    affinity.config.isolate = isolate

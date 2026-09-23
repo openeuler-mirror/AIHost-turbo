@@ -14,7 +14,9 @@ class ProcessTask(Task):
         utils.bind_process_to_cpus(pid=self.task_id, cpus=self.cpus.to_list())
 
     def assign_cpu(self, cpus: list[int]) -> None:
-        self.cpus.set_list(cpus)
+        if not cpus:
+            raise RuntimeError(f"[Error] assign cpu for process[{self.task_id}](name={self.name}) fail, invalid cpu")
+        self.cpus = utils.CPUMask().from_list(cpus)
 
     def print_actual_affinity(self, domain: AffinityDomainManager) -> None:
         priority = self._priority_names.get(self.priority, "UNKNOWN")
