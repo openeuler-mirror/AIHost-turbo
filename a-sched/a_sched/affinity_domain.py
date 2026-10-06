@@ -122,6 +122,7 @@ class AffinityDomainBuilder:
 
         self._exclude_cpus = config.exclude_cpus
         self._container_cpus = utils.get_allowed_cpu_list()
+        self._online_cpus = utils.get_online_cpus()
 
         self._cpu_dict: dict[int, CpuCore] = {}
         self._numa_dict: dict[int, NumaNode] = {}
@@ -212,6 +213,9 @@ class AffinityDomainBuilder:
                 return False
         if self._exclude_cpus:
             if cpu in self._exclude_cpus:
+                return False
+        if self._online_cpus:
+            if cpu not in self._online_cpus:
                 return False
         return True
 

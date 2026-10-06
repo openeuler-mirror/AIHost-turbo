@@ -19,6 +19,7 @@ class TaskManager:
         self.background_tasks_cpus: list[int] = []  # 背景任务分配的CPU
         self._current_group_index: int = 0
         self._domain = domain
+        self._pid_to_npu: dict[int, int] | None = None
 
     def group_create(self, name: str = "") -> int:
         group_id = self._current_group_index
@@ -102,6 +103,25 @@ class TaskManager:
             raise ValueError(f"add process failed, process (pid={pid}, name={process_name}) not found")
 
         group.process_tasks[pid] = ProcessTask(group_id=group_id, pid=pid, name=process_name)
+        self._auto_bind_npu_for_process(group_id=group_id, pid=pid)
+
+    def _auto_bind_npu_for_process(self, group_id: int, pid: int) -> None:
+        """检测并自动绑定进程关联的 NPU。"""
+        if utils.get_ascend_device_type() == utils.AscendDeviceType.A2:
+            return
+
+        if self._pid_to_npu is None:
+            npu_to_pid = utils.get_npu_topo_process_id()
+            if not npu_to_pid:
+                return
+            self._pid_to_npu = {mapped_pid: npu_id for npu_id, mapped_pid in npu_to_pid.items()}
+
+        npu_id = self._pid_to_npu.get(pid)
+        if npu_id is None or pid in self.process_to_npu:
+            return
+
+        print(f"process[{pid}] is npu process, auto bind to npu[{npu_id}]")
+        self.process_bind_npu(npu_id=npu_id, pid=pid)
 
     def group_remove_process(
         self, group_id: int, pid: int | None = None, process_name: str | None = None, parent_name: str | None = None
