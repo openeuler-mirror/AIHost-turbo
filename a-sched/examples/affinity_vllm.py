@@ -62,9 +62,10 @@ def add_affinity_tasks(config: Config) -> None:
             affinity.process_bind_npu(npu_id=npu_id, process_name=worker_name, parent_name=engine_core_name)
 
 
-def cmd_run(config: Config, dry_run: bool = False):
+def cmd_run(config: Config, dry_run: bool = False, drop_caches_first: bool = False):
     try:
         add_affinity_tasks(config)
+        affinity.set_drop_caches(drop_caches_first and not dry_run)
         affinity.run_affinity(dry_run=dry_run)
 
     except Exception as e:
@@ -87,7 +88,7 @@ def cmd_restore():
 def main(args: argparse.Namespace):
     config = Config.parse_from_args(args)
     if args.run:
-        cmd_run(config)
+        cmd_run(config, drop_caches_first=args.drop_caches)
     elif args.dry_run:
         cmd_run(config, dry_run=True)
     elif args.print:
@@ -139,6 +140,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "-ep", "--enable_ep", action="store_true",
         help="使能专家并行(expert parallel)"
+    )
+    parser.add_argument(
+        "--drop-caches", action="store_true",
+        help="在执行亲和调度前清理页缓存"
     )
     args = parser.parse_args()
     main(args)

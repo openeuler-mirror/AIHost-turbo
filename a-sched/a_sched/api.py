@@ -183,3 +183,8 @@ def enable_cpuset_isolate(enable: bool = True) -> None:
 def set_isolate_strategy(isolate: str) -> None:
     """设置高优先级任务隔离策略。"""
     affinity.config.isolate = isolate
+
+
+def set_drop_caches(drop_caches: bool) -> None:
+    """设置是否在内存迁移前清理页缓存。"""
+    affinity.config.drop_caches = drop_caches

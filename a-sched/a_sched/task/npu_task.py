@@ -1,5 +1,6 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
+import os
 
 from a_sched.task.task_base import Task, TaskType, PriorityLevel
 from a_sched.task.thread_task import ThreadTask
@@ -111,6 +112,10 @@ class NpuTaskA3(NpuTask):
     def _get_npu_dev_sq(self) -> None:
         print(f"Starting get npu[{self.task_id}] dev_sq...")
 
+        if not os.access("/sys/devices/virtual/workqueue/", os.W_OK):
+            print("can not write to /sys/devices, skip get dev sq")
+            return
+
         # dev_sq_task
         pids = utils.get_pid_by_process_name(process_name=self.dev_sq_task_name)
         if not pids:
@@ -156,6 +161,10 @@ class NpuTaskA3(NpuTask):
 
     def _get_npu_irqs(self) -> None:
         print(f"Starting get npu[{self.task_id}] irqs...")
+
+        if not os.access("/proc/irq", os.W_OK):
+            print("can not write to /proc/irq, skip get npu irq")
+            return
 
         # sq
         irqs = utils.get_npu_irq_by_name(irq_name=SQ_IRQ, npu_id=self.task_id)

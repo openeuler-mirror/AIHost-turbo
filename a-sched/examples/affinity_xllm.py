@@ -21,12 +21,12 @@ class Config:
 
 
 def get_xllm_process(config: Config) -> list[tuple[int, str]]:
-    xllm_processes = sorted(utils.get_pid_by_process_name(process_name="xllm"))
+    xllm_processes = sorted(utils.get_pid_by_process_name(process_name="xllm", top_level=True))
     process_count = len(xllm_processes)
 
     assert process_count == config.local_nodes, (
-        f"size of xllm processes not equal to local_nodes, local_nodes={config.local_nodes}, "
-        f"size of xllm processes: {process_count}"
+        f"size of xllm main processes not equal to local_nodes, local_nodes={config.local_nodes}, "
+        f"size of xllm main processes: {process_count}"
     )
     return xllm_processes
 
@@ -38,10 +38,11 @@ def add_affinity_tasks(config: Config) -> None:
         affinity.process_bind_npu(npu_id=config.npu_start + index, pid=pid)
 
 
-def cmd_run(config: Config, dry_run: bool = False) -> None:
+def cmd_run(config: Config, dry_run: bool = False, drop_caches_first: bool = False) -> None:
     try:
         add_affinity_tasks(config)
         affinity.set_isolate_strategy(isolate="cluster")
+        affinity.set_drop_caches(drop_caches_first and not dry_run)
         affinity.run_affinity(dry_run=dry_run)
     except Exception as error:
         print(f"run affinity schedule failed, {str(error)}")
@@ -62,7 +63,7 @@ def cmd_restore() -> None:
 def main(args: argparse.Namespace) -> None:
     config = Config.parse_from_args(args)
     if args.run:
-        cmd_run(config)
+        cmd_run(config, drop_caches_first=args.drop_caches)
     elif args.dry_run:
         cmd_run(config, dry_run=True)
     elif args.print:
@@ -95,4 +96,9 @@ if __name__ == "__main__":
     parser.add_argument("--dp-size-local", type=int, required=True, help="本机data parallel大小")
     parser.add_argument("--local-nodes", type=int, required=True, help="本机xllm节点数量")
     parser.add_argument("--npu-start", type=int, default=0, help="起始NPU ID, 默认0")
+    parser.add_argument(
+        "--drop-caches",
+        action="store_true",
+        help="在执行亲和调度前清理页缓存",
+    )
     main(parser.parse_args())

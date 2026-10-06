@@ -312,11 +312,14 @@ def get_tid_by_thread_name(thread_name: str, pid: int | None, process_name: str 
 
 
 def get_pid_by_process_name(
-    process_name: str, exact_match: bool = True, parent_name: str | None = None
+    process_name: str,
+    exact_match: bool = True,
+    parent_name: str | None = None,
+    top_level: bool = False,
 ) -> list[tuple[int, str]]:
-    """根据进程名获取进程pid"""
-    matched_pids = []
+    """根据进程名获取进程pid，可只返回父进程不同名的顶层进程。"""
     pattern_compiled = re.compile(process_name)
+    matched_processes: list[tuple[int, str, int]] = []
 
     try:
         for proc in psutil.process_iter(["pid", "name", "ppid"]):
@@ -347,7 +350,7 @@ def get_pid_by_process_name(
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         continue
 
-                matched_pids.append((proc_pid, proc_name))
+                matched_processes.append((proc_pid, proc_name, proc_ppid or 0))
 
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
@@ -357,7 +360,11 @@ def get_pid_by_process_name(
     except Exception as e:
         print(f"Error: get pid fail - {e}")
 
-    return matched_pids
+    if not top_level:
+        return [(pid, name) for pid, name, _ in matched_processes]
+
+    matched_pids = {pid for pid, _, _ in matched_processes}
+    return [(pid, name) for pid, name, ppid in matched_processes if ppid not in matched_pids]
 
 
 def get_process_cpus_by_pid(pid: int) -> list:
@@ -739,3 +746,19 @@ def get_ascend_device_type() -> AscendDeviceType:
     if _ascend_device_type is None:
         _ascend_device_type = detect_ascend_device_type()
     return _ascend_device_type
+
+
+def drop_caches() -> bool:
+    """清理 Linux 页缓存，避免页缓存干扰后续内存迁移。"""
+    print("\nDropping page caches (echo 1 > /proc/sys/vm/drop_caches)...")
+    try:
+        with open("/proc/sys/vm/drop_caches", "w") as cache_file:
+            cache_file.write("1")
+        print("page caches dropped.")
+        return True
+    except PermissionError:
+        print("failed to drop caches: permission denied (need root).")
+        return False
+    except OSError as error:
+        print(f"failed to drop caches: {error}")
+        return False
