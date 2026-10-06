@@ -83,6 +83,8 @@ class AffinityEngine:
         self.backup_affinity()
         # 停止CPU硬件中断自动均衡
         self._stop_irq_balance()
+        # 关闭内核NUMA自动均衡，避免调度后被内核重新迁移
+        self._stop_numa_balancing()
         # 根据亲和方案绑定cpu
         self._bind_cpus()
         # 迁移进程内存到新numa节点
@@ -107,8 +109,19 @@ class AffinityEngine:
         print("\nStopping irqbalance service...")
         _, _, return_code = utils.execute_command(["systemctl", "is-active", "--quiet", "irqbalance"])
         if return_code == 0:
-            utils.execute_command(["systemctl", "stop", "irqbalance"])
-            print("the irqbalance service has been stopped.")
+            _, stderr, return_code = utils.execute_command(["systemctl", "stop", "irqbalance"])
+            if return_code == 0:
+                print("the irqbalance service has been stopped.")
+            else:
+                print(f"failed to stop irqbalance service: {stderr.strip()}")
+
+    def _stop_numa_balancing(self) -> None:
+        print("\nStopping kernel numa_balancing...")
+        _, stderr, return_code = utils.execute_command(["sysctl", "-w", "kernel.numa_balancing=0"])
+        if return_code == 0:
+            print("kernel.numa_balancing has been set to 0.")
+        else:
+            print(f"failed to set kernel.numa_balancing=0: {stderr.strip()}")
 
     def _bind_cpus(self) -> None:
         print("\nStarting bind cpus...")
