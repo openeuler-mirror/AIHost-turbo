@@ -13,6 +13,7 @@ from a_sched.api import (
     set_exclude_cpu,
     enable_cpuset_isolate,
     set_isolate_strategy,
+    set_schedule_strategy,
     set_drop_caches,
 )
 
@@ -32,5 +33,6 @@ __all__ = [
     "set_exclude_cpu",
     "enable_cpuset_isolate",
     "set_isolate_strategy",
+    "set_schedule_strategy",
     "set_drop_caches",
 ]

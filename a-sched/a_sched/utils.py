@@ -824,6 +824,46 @@ def _parse_npu_topo_output_a5(topo_output: str) -> dict[int, list[int]]:
     return npu_cpu_affinity
 
 
+def get_npu_topo_numa_affinity() -> dict[int, int]:
+    """Build an NPU-to-NUMA map from NPU CPU affinity and NUMA cpulists."""
+    npu_cpu_affinity = get_npu_topo_cpu_affinity()
+    if not npu_cpu_affinity:
+        raise RuntimeError("Failed to get NPU topo cpu affinity.")
+
+    node_cpu_map: dict[int, list[int]] = {}
+    try:
+        node_dirs = [entry for entry in os.listdir("/sys/devices/system/node/") if entry.startswith("node")]
+        for node_dir in node_dirs:
+            node_id = int(node_dir.removeprefix("node"))
+            try:
+                with open(f"/sys/devices/system/node/{node_dir}/cpulist", "r", encoding="utf-8") as node_file:
+                    node_cpu_map[node_id] = parse_cpu_affinity_string(node_file.read().strip())
+            except (OSError, ValueError) as error:
+                print(f"[Warning] Failed to read cpulist for {node_dir}: {error}")
+    except OSError as error:
+        raise RuntimeError(f"Failed to read NUMA topology: {error}") from error
+
+    if not node_cpu_map:
+        raise RuntimeError("Failed to build CPU-to-NUMA mapping")
+
+    cpu_to_numa = {
+        cpu: node_id
+        for node_id, cpus in node_cpu_map.items()
+        for cpu in cpus
+    }
+    npu_to_numa: dict[int, int] = {}
+    for npu_id, cpus in npu_cpu_affinity.items():
+        numa_ids = {cpu_to_numa[cpu] for cpu in cpus if cpu in cpu_to_numa}
+        if not numa_ids:
+            raise RuntimeError(f"NPU[{npu_id}] affinity CPUs do not map to a NUMA node")
+        if len(numa_ids) > 1:
+            raise RuntimeError(
+                f"NPU[{npu_id}] is affinity to multiple NUMAs {sorted(numa_ids)}"
+            )
+        npu_to_numa[npu_id] = numa_ids.pop()
+    return npu_to_numa
+
+
 def get_npu_topo_process_id() -> dict[int, int]:
     """通过 npu-smi 获取 NPU 与关联进程 PID 的映射。"""
     try:
