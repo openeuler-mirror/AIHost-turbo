@@ -18,7 +18,7 @@ class Config:
             dp_start_rank=args.dp_start_rank,
             dp_size=args.dp_size,
             tp_size=args.tp_size,
-            enable_ep=args.enable_ep
+            enable_ep=args.enable_ep,
         )
 
 
@@ -87,6 +87,12 @@ def cmd_restore():
 
 def main(args: argparse.Namespace):
     config = Config.parse_from_args(args)
+    if args.npu_affinity:
+        affinity.set_schedule_strategy(
+            "auto",
+            npu_process_cluster_mode=args.npu_process_cluster_mode,
+            enable_npu_topo_affinity=True,
+        )
     if args.run:
         cmd_run(config, drop_caches_first=args.drop_caches)
     elif args.dry_run:
@@ -105,45 +111,34 @@ if __name__ == "__main__":
         description="用于vllm推理框架自适应亲和隔离调度",
         epilog="使用示例: python affinity_vllm.py -tp-size 2 -dp-size 4 -r",
     )
+    parser.add_argument("-r", "--run", action="store_true", help="运行亲和调度")
+    parser.add_argument("-d", "--dry-run", action="store_true", help="试运行亲和调度，仅做方案决策，不做方案执行")
+    parser.add_argument("-p", "--print", action="store_true", help="打印亲和组进程/线程当前实际的亲和信息")
+    parser.add_argument("-restore", "--restore", action="store_true", help="恢复进程和线程亲和性到调度前状态")
+    parser.add_argument("-tp-size", "--tp-size", type=int, required=True, help="张量并行(tensor parallel)大小")
+    parser.add_argument("-dp-size", "--dp-size", type=int, required=True, help="数据并行(data parallel)大小")
     parser.add_argument(
-        "-r", "--run", action="store_true",
-        help="运行亲和调度"
+        "-dp-size-local", "--dp-size-local", type=int, default=0, help="当前节点数据并行(data parallel)大小"
     )
     parser.add_argument(
-        "-d", "--dry-run", action="store_true",
-        help="试运行亲和调度，仅做方案决策，不做方案执行"
+        "-dp-start-rank", "--dp-start-rank", type=int, default=0, help="当前节点数据并行(data parallel)起始rank"
+    )
+    parser.add_argument("-ep", "--enable_ep", action="store_true", help="使能专家并行(expert parallel)")
+    parser.add_argument(
+        "--drop-caches", action="store_true", help="在执行亲和调度前先执行 echo 1 > /proc/sys/vm/drop_caches 清理页缓存"
     )
     parser.add_argument(
-        "-p", "--print", action="store_true",
-        help="打印亲和组进程/线程当前实际的亲和信息"
+        "-npu-affinity", "--npu-affinity", action="store_true", help="开启NPU亲和调度（仅A5 NPU场景有效，默认不开启）"
     )
     parser.add_argument(
-        "-restore", "--restore", action="store_true",
-        help="恢复进程和线程亲和性到调度前状态"
+        "--npu-process-cluster-mode",
+        type=str,
+        default="colocated",
+        choices=["isolated", "colocated", "shared"],
+        help="NPU亲和调度时的进程/线程布局策略（仅--npu-affinity时生效，默认colocated）："
+        "isolated-NPU进程绑定到其它cluster；"
+        "colocated-NPU进程绑定到关键线程所在cluster的剩余核；"
+        "shared-多NPU关键线程共享cluster",
     )
-    parser.add_argument(
-        "-tp-size", "--tp-size", type=int, required=True,
-        help="张量并行(tensor parallel)大小"
-    )
-    parser.add_argument(
-        "-dp-size", "--dp-size", type=int, required=True,
-        help="数据并行(data parallel)大小"
-    )
-    parser.add_argument(
-        "-dp-size-local", "--dp-size-local", type=int, default=0,
-        help="当前节点数据并行(data parallel)大小"
-    )
-    parser.add_argument(
-        "-dp-start-rank", "--dp-start-rank", type=int, default=0,
-        help="当前节点数据并行(data parallel)起始rank"
-    )
-    parser.add_argument(
-        "-ep", "--enable_ep", action="store_true",
-        help="使能专家并行(expert parallel)"
-    )
-    parser.add_argument(
-        "--drop-caches", action="store_true",
-        help="在执行亲和调度前清理页缓存"
-    )
-    args = parser.parse_args()
-    main(args)
+    parsed_args = parser.parse_args()
+    main(parsed_args)

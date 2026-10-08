@@ -5,6 +5,8 @@ ISOL_NUMA = "numa"
 ISOL_CLUSTER = "cluster"
 
 NPU_PROCESS_CLUSTER_MODE_ISOLATED = "isolated"
+NPU_PROCESS_CLUSTER_MODE_COLOCATED = "colocated"
+NPU_PROCESS_CLUSTER_MODE_SHARED = "shared"
 
 
 class AffinityConfig:
