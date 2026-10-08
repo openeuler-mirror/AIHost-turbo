@@ -6,6 +6,7 @@ import a_sched.utils as utils
 
 HBS_ISOLATE_CLUSTER = "hbs_isolate_cluster"
 HBS_ISOLATE_NUMA = "hbs_isolate_numa"
+HBS_NPU_AFFINITY_ISOLATE_CLUSTER = "hbs_npu_affinity_isolate_cluster"
 
 
 def decide_scheduler(config: AffinityConfig, domain: AffinityDomainManager, task: TaskManager) -> str:
@@ -13,6 +14,8 @@ def decide_scheduler(config: AffinityConfig, domain: AffinityDomainManager, task
     决策调度器类型
     """
 
+    if config.enable_npu_topo_affinity:
+        return decide_on_npu_affinity(config=config, domain=domain, task=task)
     if config.isolate == cfg.ISOL_CLUSTER:
         return decide_on_isol_cluster(config=config, domain=domain, task=task)
     elif config.isolate == cfg.ISOL_NUMA:
@@ -62,6 +65,14 @@ def decide_on_isol_auto(config: AffinityConfig, domain: AffinityDomainManager, t
         return decide_on_isol_cluster(config=config, domain=domain, task=task)
     else:
         raise RuntimeError(f"unsupported ascend device type {device_type}")
+
+
+def decide_on_npu_affinity(config: AffinityConfig, domain: AffinityDomainManager, task: TaskManager) -> str:
+    """NPU 拓扑亲和调度目前仅支持 A5。"""
+    device_type = utils.get_ascend_device_type()
+    if device_type != utils.AscendDeviceType.A5:
+        raise RuntimeError(f"NPU topology affinity only supports A5, got {device_type}")
+    return HBS_NPU_AFFINITY_ISOLATE_CLUSTER
 
 
 class SchedulerFactory:

@@ -185,6 +185,19 @@ def set_isolate_strategy(isolate: str) -> None:
     affinity.config.isolate = isolate
 
 
+def set_schedule_strategy(
+    isolate: str = "auto",
+    npu_process_cluster_mode: str = "isolated",
+    enable_npu_topo_affinity: bool = False,
+) -> None:
+    """设置隔离策略和可选的 NPU 拓扑亲和调度。"""
+    affinity.config.set_schedule_strategy(
+        isolate=isolate,
+        npu_process_cluster_mode=npu_process_cluster_mode,
+        enable_npu_topo_affinity=enable_npu_topo_affinity,
+    )
+
+
 def set_drop_caches(drop_caches: bool) -> None:
     """设置是否在内存迁移前清理页缓存。"""
     affinity.config.drop_caches = drop_caches

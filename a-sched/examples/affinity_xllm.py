@@ -41,7 +41,7 @@ def add_affinity_tasks(config: Config) -> None:
 def cmd_run(config: Config, dry_run: bool = False, drop_caches_first: bool = False) -> None:
     try:
         add_affinity_tasks(config)
-        affinity.set_isolate_strategy(isolate="cluster")
+        affinity.set_schedule_strategy(isolate="cluster")
         affinity.set_drop_caches(drop_caches_first and not dry_run)
         affinity.run_affinity(dry_run=dry_run)
     except Exception as error:
