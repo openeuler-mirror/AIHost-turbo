@@ -190,7 +190,11 @@ def set_schedule_strategy(
     npu_process_cluster_mode: str = "isolated",
     enable_npu_topo_affinity: bool = False,
 ) -> None:
-    """设置隔离策略和可选的 NPU 拓扑亲和调度。"""
+    """设置隔离策略和可选的 NPU 拓扑亲和调度。
+
+    ``npu_process_cluster_mode`` supports ``isolated``, ``colocated`` and
+    ``shared`` layouts when NPU topology affinity is enabled.
+    """
     affinity.config.set_schedule_strategy(
         isolate=isolate,
         npu_process_cluster_mode=npu_process_cluster_mode,

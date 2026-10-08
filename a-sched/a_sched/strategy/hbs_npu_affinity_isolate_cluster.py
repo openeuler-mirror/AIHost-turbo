@@ -228,18 +228,30 @@ class HbsNpuAffinityIsolateCluster(SchedulerBase):
 
         # 1. 按npu_process_cluster_mode布局策略，为每个NPU的高优先级线程（acl_thread、release_thread、
         #    rt_recycle及对应高优先级线程）分配独占cluster
-        for npu_id, npu_task in group.npu_tasks.items():
-            if self.config.npu_process_cluster_mode == cfg.NPU_PROCESS_CLUSTER_MODE_ISOLATED:
-                self._npu_process_cluster_mode_isolated_high_prio(
-                    group_id=group_id,
-                    npu_id=npu_id,
-                    npu_task=npu_task,
-                )
-            else:
-                raise RuntimeError(
-                    f"Task group {group_id}: unsupported npu_process_cluster_mode strategy "
-                    f"'{self.config.npu_process_cluster_mode}'"
-                )
+        npu_to_cluster: dict[int, int] = {}  # npu_id -> 选中的cluster（colocated/shared布局下进程复用）
+        if self.config.npu_process_cluster_mode == cfg.NPU_PROCESS_CLUSTER_MODE_SHARED:
+            # shared布局下，批量处理所有NPU的cluster分配（支持多NPU共享cluster，按各NPU自身亲和NUMA分组）
+            npu_to_cluster = self._npu_process_cluster_mode_shared_high_prio(group_id=group_id)
+        else:
+            for npu_id, npu_task in group.npu_tasks.items():
+                if self.config.npu_process_cluster_mode == cfg.NPU_PROCESS_CLUSTER_MODE_ISOLATED:
+                    self._npu_process_cluster_mode_isolated_high_prio(
+                        group_id=group_id,
+                        npu_id=npu_id,
+                        npu_task=npu_task,
+                    )
+                elif self.config.npu_process_cluster_mode == cfg.NPU_PROCESS_CLUSTER_MODE_COLOCATED:
+                    cluster = self._npu_process_cluster_mode_colocated_high_prio(
+                        group_id=group_id,
+                        npu_id=npu_id,
+                        npu_task=npu_task,
+                    )
+                    npu_to_cluster[npu_id] = cluster
+                else:
+                    raise RuntimeError(
+                        f"Task group {group_id}: unsupported npu_process_cluster_mode strategy "
+                        f"'{self.config.npu_process_cluster_mode}'"
+                    )
 
         # 2. 按npu_process_cluster_mode布局策略，为绑定NPU的进程及未绑定NPU的进程/线程分配cluster
         npu_bind_pids = [npu_task.bind_pid for npu_task in group.npu_tasks.values() if npu_task.bind_pid is not None]
@@ -257,6 +269,20 @@ class HbsNpuAffinityIsolateCluster(SchedulerBase):
         if shared_tasks:
             if self.config.npu_process_cluster_mode == cfg.NPU_PROCESS_CLUSTER_MODE_ISOLATED:
                 shared_clusters = self._npu_process_cluster_mode_isolated(
+                    group_id=group_id,
+                    tasks=shared_tasks,
+                )
+            elif self.config.npu_process_cluster_mode == cfg.NPU_PROCESS_CLUSTER_MODE_COLOCATED:
+                shared_clusters = self._npu_process_cluster_mode_colocated(
+                    group_id=group_id,
+                    npu_bind_processes=npu_bind_processes,
+                    other_processes=other_processes,
+                    other_threads=other_threads,
+                    npu_to_cluster=npu_to_cluster,
+                )
+            elif self.config.npu_process_cluster_mode == cfg.NPU_PROCESS_CLUSTER_MODE_SHARED:
+                # shared布局：绑定进程绑NPU亲和numa其它未使用cluster，未绑进程范围绑到绑定进程cluster并集(共享池)
+                shared_clusters = self._npu_process_cluster_mode_shared(
                     group_id=group_id,
                     tasks=shared_tasks,
                 )
@@ -343,6 +369,384 @@ class HbsNpuAffinityIsolateCluster(SchedulerBase):
             all_clusters.update(unbound_clusters)
 
         return sorted(all_clusters)
+
+    def _npu_process_cluster_mode_colocated_high_prio(
+        self,
+        group_id: int,
+        npu_id: int,
+        npu_task,
+    ) -> int:
+        """
+        colocated布局策略下，为NPU的高优先级线程（acl_thread、release_thread、rt_recycle
+        及对应高优先级线程）分配一个独占cluster。npu进程复用该cluster中高优先级线程未使用的核
+
+        按该NPU自身亲和NUMA/socket选取，降级同socket其它numa，仍无则失败。
+
+        Returns:
+            选中的cluster id
+        """
+        numa_id = self._npu_to_numa[npu_id]
+        socket_id = self._npu_to_socket[npu_id]
+        cluster = self._acquire_one_cluster(numa_id=numa_id, socket_id=socket_id)
+        if cluster is None:
+            raise RuntimeError(
+                f"Task group {group_id}, NPU[{npu_id}]: no available cluster for high priority threads "
+                f"(acl/release/rt_recycle), numa={numa_id}, socket={socket_id}"
+            )
+
+        # 获取该cluster的CPU
+        cluster_cpus = self.domain.get_cpus_of_clusters(clusters=[cluster])
+        if not cluster_cpus:
+            raise RuntimeError(f"Task group {group_id}, NPU[{npu_id}]: cluster {cluster} has no CPUs")
+
+        # 分配CPU给NPU task（内部会为acl_thread/release_thread/rt_recycle及高优先级线程分核）
+        # 按cluster_cpus实际所属NUMA/socket推导，避免降级到兄弟NUMA时与cluster归属不一致
+        self._update_task_affinity(npu_task, cluster_cpus)
+
+        # colocated布局下，进程会复用该cluster的剩余核，cluster整体标记为已使用
+        self._used_clusters.add(cluster)
+
+        print(
+            f"  NPU[{npu_id}]: assigned cluster {cluster} (numa={npu_task.numa}) "
+            f"for high priority threads, cpus={utils.compress_continuous(cluster_cpus)}"
+        )
+        return cluster
+
+    @staticmethod
+    def _solve_min_k(npu_num: int, cluster_num: int, min_capacity: int) -> int:
+        """求最小的每cluster容纳数k，使 ceil(npu_num/k) <= cluster_num 且 k <= min_capacity。
+
+        优先均衡：所有被分配cluster容纳相同数目k（最后一个可能少），k尽可能小。
+        均衡分配无法满足时退化为按容量尽量塞（k=min_capacity，不严格均衡）。
+        """
+        k = 1
+        while k <= min_capacity:
+            need_clusters = (npu_num + k - 1) // k  # ceil(npu_num / k)
+            if need_clusters <= cluster_num:
+                break
+            k += 1
+        return min(k, min_capacity)
+
+    def _npu_process_cluster_mode_shared_high_prio(
+        self,
+        group_id: int,
+    ) -> dict[int, int]:
+        """
+        shared布局策略下，为亲和组内所有NPU的高优先级线程（acl_thread、release_thread、
+        rt_recycle及对应高优先级线程）分配cluster。
+
+        多NUMA/多socket场景按各NPU自身亲和NUMA分组，每组各自独立决策（支持亲和到不同NUMA）：
+        1. 若该numa的可用cluster数目(降级同socket其它numa) >= 本组NPU数目，每个NPU独占一个cluster
+        2. 若cluster数目 < 本组NPU数目，但单个cluster可满足多个NPU关键线程所需核数，
+           多个NPU共享cluster；优先保障被分配cluster容纳的NPU数目均衡，其次每个cluster
+           容纳的NPU数目尽可能少
+        3. 若仍不满足则分配失败
+
+        Returns:
+            dict: npu_id -> 选中的cluster id
+        """
+        group = self.task.get_group(group_id)
+        npu_to_cluster: dict[int, int] = {}
+        # 按各NPU自身亲和NUMA/socket分组，每组独立决策
+        numas: dict[tuple[int, int], list[int]] = {}
+        for npu_id in sorted(group.npu_tasks.keys()):
+            nid = self._npu_to_numa[npu_id]
+            sck = self._npu_to_socket[npu_id]
+            numas.setdefault((nid, sck), []).append(npu_id)
+        for (nid, sck), npu_ids in numas.items():
+            self._assign_shared_high_prio_for_numa(
+                group_id=group_id,
+                numa_id=nid,
+                socket_id=sck,
+                npu_ids=npu_ids,
+                npu_to_cluster=npu_to_cluster,
+            )
+        return npu_to_cluster
+
+    def _assign_shared_high_prio_for_numa(
+        self,
+        group_id: int,
+        numa_id: int,
+        socket_id: int,
+        npu_ids: list[int],
+        npu_to_cluster: dict[int, int],
+    ) -> None:
+        """
+        shared布局策略下，为亲和到同一NUMA的一组NPU的高优先级线程分配cluster（独立决策）。
+
+        分配策略：
+        1. 若可用cluster数目 >= 本组NPU数目，每个NPU独占一个cluster
+        2. 若cluster数目 < 本组NPU数目，但单个cluster可满足多个NPU关键线程所需核数，
+           多个NPU共享cluster；优先均衡，其次每个cluster容纳的NPU数目尽可能少
+        3. 若仍不满足则分配失败
+        """
+        group = self.task.get_group(group_id)
+        npu_num = len(npu_ids)
+
+        # 收集该NUMA中可用cluster（降级到同socket其它numa）
+        available_clusters = self._acquire_clusters_for_processes(numa_id=numa_id, socket_id=socket_id)
+        if not available_clusters:
+            raise RuntimeError(
+                f"Task group {group_id}: no available cluster for high priority threads "
+                f"(acl/release/rt_recycle), numa={numa_id}, socket={socket_id}"
+            )
+
+        cluster_num = len(available_clusters)
+        npu_need_cpus = {npu_id: group.npu_tasks[npu_id].min_cpu for npu_id in npu_ids}
+        cluster_cpu_size = {c: len(self.domain.get_cpus_of_clusters(clusters=[c])) for c in available_clusters}
+
+        # 策略1：cluster数目 >= NPU数目，每个NPU独占一个cluster
+        if cluster_num >= npu_num:
+            for i, npu_id in enumerate(npu_ids):
+                cluster = available_clusters[i]
+                self._assign_shared_high_prio_cluster(
+                    group_id=group_id,
+                    npu_id=npu_id,
+                    npu_task=group.npu_tasks[npu_id],
+                    cluster=cluster,
+                )
+                npu_to_cluster[npu_id] = cluster
+            return
+
+        # 策略2：cluster数目 < NPU数目，多NPU共享cluster
+        # 优先保障被分配cluster容纳的NPU数目均衡，其次每个cluster容纳的NPU数目尽可能少
+        # 即：找最小的每cluster容纳数k，使得 ceil(NPU数/k) <= cluster数 且 k <= 每cluster容量，
+        # 使用 ceil(NPU数/k) 个cluster，每个容纳k个（最后一个容纳余数）
+        max_cpus_per_npu = max(npu_need_cpus.values()) if npu_need_cpus else 1
+        # 每个cluster能容纳的NPU数 = cluster核数 // 单NPU所需核数（用最大所需核数保守估计）
+        cluster_capacity = {c: max(1, cluster_cpu_size[c] // max_cpus_per_npu) for c in available_clusters}
+        total_capacity = sum(cluster_capacity.values())
+
+        if total_capacity < npu_num:
+            # 策略3：仍不满足，分配失败
+            raise RuntimeError(
+                f"Task group {group_id}: cannot satisfy {npu_num} NPUs with {cluster_num} clusters "
+                f"(total capacity {total_capacity} < npu num {npu_num}), numa={numa_id}, socket={socket_id}"
+            )
+
+        # 寻找最小的每cluster容纳数k，使 ceil(npu_num/k) <= cluster_num 且 k <= min(cluster_capacity)
+        # 优先均衡：所有被分配cluster容纳相同数目k（最后一个可能少），k尽可能小
+        min_capacity = min(cluster_capacity.values())
+        k = self._solve_min_k(npu_num, cluster_num, min_capacity)
+
+        # 使用前 need_clusters 个cluster，每个容纳k个NPU（最后一个容纳余数）
+        need_clusters = (npu_num + k - 1) // k
+        used_clusters = available_clusters[:need_clusters]
+        remaining_npus = list(npu_ids)
+
+        for cluster in used_clusters:
+            if not remaining_npus:
+                break
+            # 该cluster容纳的NPU数（最后一个可能少于k）
+            take = min(k, len(remaining_npus))
+            take_npus = remaining_npus[:take]
+            remaining_npus = remaining_npus[take:]
+
+            # 该cluster的核分配给这些NPU（每个NPU按min_cpu取核）
+            cluster_cpus = self.domain.get_cpus_of_clusters(clusters=[cluster])
+            cpu_start = 0
+            for npu_id in take_npus:
+                need = npu_need_cpus[npu_id]
+                npu_cpus = cluster_cpus[cpu_start : cpu_start + need]
+                cpu_start += need
+                self._assign_shared_high_prio_cluster(
+                    group_id=group_id,
+                    npu_id=npu_id,
+                    npu_task=group.npu_tasks[npu_id],
+                    cluster=cluster,
+                    cpus=npu_cpus,
+                )
+                npu_to_cluster[npu_id] = cluster
+
+        # 若仍有剩余NPU（均衡分配无法完全容纳），继续往有剩余容量的cluster塞
+        for npu_id in remaining_npus:
+            need = npu_need_cpus[npu_id]
+            placed = False
+            for cluster in available_clusters:
+                used_in_cluster = sum(npu_need_cpus[n] for n, c in npu_to_cluster.items() if c == cluster)
+                if used_in_cluster + need <= cluster_cpu_size[cluster]:
+                    cluster_cpus = self.domain.get_cpus_of_clusters(clusters=[cluster])
+                    npu_cpus = cluster_cpus[used_in_cluster : used_in_cluster + need]
+                    self._assign_shared_high_prio_cluster(
+                        group_id=group_id,
+                        npu_id=npu_id,
+                        npu_task=group.npu_tasks[npu_id],
+                        cluster=cluster,
+                        cpus=npu_cpus,
+                    )
+                    npu_to_cluster[npu_id] = cluster
+                    placed = True
+                    break
+            if not placed:
+                raise RuntimeError(
+                    f"Task group {group_id}, NPU[{npu_id}]: cannot find cluster with enough cpus "
+                    f"({need} needed) for high priority threads, numa={numa_id}, socket={socket_id}"
+                )
+
+    def _assign_shared_high_prio_cluster(
+        self,
+        group_id: int,
+        npu_id: int,
+        npu_task,
+        cluster: int,
+        cpus: list[int] | None = None,
+    ) -> None:
+        """
+        将指定cluster（或指定cpus）分配给NPU的高优先级线程，并设置亲和信息
+        """
+        if cpus is None:
+            cpus = self.domain.get_cpus_of_clusters(clusters=[cluster])
+        if not cpus:
+            raise RuntimeError(f"Task group {group_id}, NPU[{npu_id}]: cluster {cluster} has no CPUs")
+
+        # 按cpus实际所属NUMA/socket推导，避免降级到兄弟NUMA时与cluster归属不一致
+        self._update_task_affinity(npu_task, cpus)
+
+        # 标记该cluster为已使用（高优先级线程已占用部分核，进程不再复用该cluster）
+        self._used_clusters.add(cluster)
+
+        print(
+            f"  NPU[{npu_id}]: assigned cluster {cluster} (numa={npu_task.numa}) "
+            f"for high priority threads, cpus={utils.compress_continuous(cpus)}"
+        )
+
+    def _npu_process_cluster_mode_shared(
+        self,
+        group_id: int,
+        tasks: list,
+    ) -> list[int]:
+        """shared布局：绑定NPU进程按其绑定NPU各自亲和NUMA取其它未使用cluster（同NUMA的进程
+        共享该NUMA可用cluster，降级同socket兄弟NUMA）；未绑定NPU的进程/非关键线程范围绑到
+        组内所有绑定进程所在cluster的cpu核并集（共享池）。无绑定进程时
+        退化为组所有NPU亲和NUMA可用cluster并集。
+        """
+        group = self.task.get_group(group_id)
+        group_numas = self._task_group_to_numas.get(group_id, [])
+
+        pid_to_npu: dict[int, int] = {}
+        for npu_id, npu_task in group.npu_tasks.items() if group is not None else []:
+            if npu_task.bind_pid is not None:
+                pid_to_npu[npu_task.bind_pid] = npu_id
+
+        bind_tasks = [t for t in tasks if t.task_id in pid_to_npu]
+        unbound_tasks = [t for t in tasks if t.task_id not in pid_to_npu]
+
+        all_clusters: set[int] = set()
+        # 1. 绑定进程：按各自NPU亲和NUMA/socket分组取其它未使用cluster
+        if bind_tasks:
+            pid_groups: dict[tuple[int, int], list] = {}
+            for t in bind_tasks:
+                npu_id = pid_to_npu[t.task_id]
+                nid = self._npu_to_numa[npu_id]
+                sck = self._npu_to_socket[npu_id]
+                pid_groups.setdefault((nid, sck), []).append(t)
+            for (nid, sck), procs in pid_groups.items():
+                bind_clusters = self._acquire_clusters_for_processes(numa_id=nid, socket_id=sck)
+                if not bind_clusters:
+                    raise RuntimeError(
+                        f"Task group {group_id}: no available cluster for bound processes/threads "
+                        f"(numa={nid}, socket={sck})"
+                    )
+                self._assign_clusters_cpus_to_tasks(clusters=bind_clusters, tasks=procs)
+                self._used_clusters.update(bind_clusters)
+                all_clusters.update(bind_clusters)
+        # 2. 未绑定进程/非关键线程：范围绑到所有绑定进程所在cluster的核并集（共享池）
+        if unbound_tasks:
+            if all_clusters:
+                unbound_clusters = sorted(all_clusters)
+            else:
+                # 无绑定进程：用组内所有NPU亲和NUMA的可用cluster并集
+                unbound_clusters: list[int] = []
+                for nid in group_numas:
+                    sck = self._numa_to_socket.get(nid)
+                    if sck is None:
+                        continue
+                    unbound_clusters.extend(self._acquire_clusters_for_processes(numa_id=nid, socket_id=sck))
+                unbound_clusters = sorted(set(unbound_clusters))
+            bind_cpus_pool = self.domain.get_cpus_of_clusters(clusters=unbound_clusters)
+            if not bind_cpus_pool:
+                raise RuntimeError(
+                    f"Task group {group_id}: no available cluster for unbound processes/threads (numas={group_numas})"
+                )
+            self._assign_cpus_to_tasks(cpus=bind_cpus_pool, tasks=unbound_tasks)
+            self._used_clusters.update(unbound_clusters)
+            all_clusters.update(unbound_clusters)
+
+        return sorted(all_clusters)
+
+    def _npu_process_cluster_mode_colocated(
+        self,
+        group_id: int,
+        npu_bind_processes: list,
+        other_processes: list,
+        other_threads: list,
+        npu_to_cluster: dict[int, int],
+    ) -> list[int]:
+        """
+        colocated布局策略：绑定该NPU的进程范围绑定到上述高优先级线程所在cluster中的
+        其它未使用的核；亲和组中其它未绑定NPU的进程/线程共享所有NPU高优先级线程所在cluster的
+        剩余核并集（共享池）。
+
+        Args:
+            npu_bind_processes: 绑定NPU的进程列表，与npu_to_cluster的key顺序对应
+            other_processes: 未绑定NPU的进程列表
+            other_threads: 未绑定NPU的普通优先级线程列表
+            npu_to_cluster: npu_id -> 高优先级线程选中的cluster id
+        """
+        group = self.task.get_group(group_id)
+        all_clusters: set[int] = set()
+
+        # 绑定NPU的进程按其绑定的npu索引
+        pid_to_npu: dict[int, int] = {}
+        for npu_id, npu_task in group.npu_tasks.items() if group is not None else []:
+            if npu_task.bind_pid is not None:
+                pid_to_npu[npu_task.bind_pid] = npu_id
+
+        # 1. 绑定NPU的进程：各自绑定到所绑NPU高优先级线程所在cluster的剩余核
+        for proc in npu_bind_processes:
+            npu_id = pid_to_npu.get(proc.task_id)
+            if npu_id is None:
+                continue
+            cluster = npu_to_cluster.get(npu_id)
+            if cluster is None:
+                continue
+            npu_task = group.npu_tasks.get(npu_id)
+            remain_cpus = self._get_remain_cpus_in_cluster(cluster=cluster, npu_task=npu_task)
+            if not remain_cpus:
+                raise RuntimeError(
+                    f"Task group {group_id}, NPU[{npu_id}]: no remain cpus in cluster {cluster} for bound processes"
+                )
+            self._assign_cpus_to_tasks(cpus=remain_cpus, tasks=[proc])
+            all_clusters.add(cluster)
+
+        # 2. 未绑定NPU的进程/线程：共享所有NPU高优先级线程所在cluster的剩余核并集（共享池）
+        other_tasks = other_processes + other_threads
+        if other_tasks:
+            shared_cpus: list[int] = []
+            for npu_id, cluster in npu_to_cluster.items():
+                npu_task = group.npu_tasks.get(npu_id)
+                shared_cpus.extend(self._get_remain_cpus_in_cluster(cluster=cluster, npu_task=npu_task))
+            shared_cpus = sorted(set(shared_cpus))
+            if not shared_cpus:
+                raise RuntimeError(
+                    f"Task group {group_id}: no remain cpus in colocated clusters {sorted(npu_to_cluster.values())} "
+                    f"for unbound processes/threads"
+                )
+            self._assign_cpus_to_tasks(cpus=shared_cpus, tasks=other_tasks)
+            all_clusters.update(npu_to_cluster.values())
+
+        return sorted(all_clusters)
+
+    def _get_remain_cpus_in_cluster(self, cluster: int, npu_task) -> list[int]:
+        """
+        获取cluster中高优先级线程分配后剩余的核
+        assign_cpu按顺序为acl/release/rt_recycle及高优先级线程各分配1个核，剩余即为cluster_cpus[min_cpu:]
+        """
+        cluster_cpus = self.domain.get_cpus_of_clusters(clusters=[cluster])
+        if not cluster_cpus:
+            return []
+        used_num = npu_task.min_cpu if npu_task is not None else 0
+        return cluster_cpus[used_num:]
 
     def _npu_process_cluster_mode_isolated_high_prio(
         self,
@@ -465,5 +869,4 @@ class HbsNpuAffinityIsolateCluster(SchedulerBase):
             return []
         numas = [nid for nid in socket.get_all_children_id() if nid != exclude]
         return sorted(numas)
-
 
