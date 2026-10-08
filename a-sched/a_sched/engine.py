@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from a_sched.affinity_domain import AffinityDomainManager
 from a_sched.cpuset import CpusetManager
 from a_sched.task import TaskManager
@@ -83,8 +85,12 @@ class AffinityEngine:
         self.backup_affinity()
         # 停止CPU硬件中断自动均衡
         self._stop_irq_balance()
+        # 关闭内核NUMA自动均衡，避免调度后被内核重新迁移
+        self._stop_numa_balancing()
         # 根据亲和方案绑定cpu
         self._bind_cpus()
+        if self.config.drop_caches:
+            utils.drop_caches()
         # 迁移进程内存到新numa节点
         self._bind_memory()
 
@@ -107,8 +113,19 @@ class AffinityEngine:
         print("\nStopping irqbalance service...")
         _, _, return_code = utils.execute_command(["systemctl", "is-active", "--quiet", "irqbalance"])
         if return_code == 0:
-            utils.execute_command(["systemctl", "stop", "irqbalance"])
-            print("the irqbalance service has been stopped.")
+            _, stderr, return_code = utils.execute_command(["systemctl", "stop", "irqbalance"])
+            if return_code == 0:
+                print("the irqbalance service has been stopped.")
+            else:
+                print(f"failed to stop irqbalance service: {stderr.strip()}")
+
+    def _stop_numa_balancing(self) -> None:
+        print("\nStopping kernel numa_balancing...")
+        _, stderr, return_code = utils.execute_command(["sysctl", "-w", "kernel.numa_balancing=0"])
+        if return_code == 0:
+            print("kernel.numa_balancing has been set to 0.")
+        else:
+            print(f"failed to set kernel.numa_balancing=0: {stderr.strip()}")
 
     def _bind_cpus(self) -> None:
         print("\nStarting bind cpus...")
@@ -166,6 +183,7 @@ class AffinityEngine:
 
     def _bind_memory(self) -> None:
         print("\nStarting bind memory...")
+        migrate_tasks = []
         for _, group in self.task.groups.items():
             for _, process in group.process_tasks.items():
                 if not process.numa:
@@ -176,13 +194,26 @@ class AffinityEngine:
                 if not src_numa:
                     print(f"can not get source numa of process [{process.task_id}]")
                     continue
-                print(
-                    f"migrating pages of process [{process.task_id}] from source numa {src_numa} to target numa [{tgt_numa}]"
-                )
+                migrate_tasks.append((process.task_id, src_numa, tgt_numa))
+
+        if not migrate_tasks:
+            print("no process need to migrate.")
+            return
+
+        print(f"migrating {len(migrate_tasks)} processes in parallel...")
+        max_workers = min(len(migrate_tasks), 16)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_to_task = {
+                pool.submit(utils.migrate_process_pages, pid=pid, src_numa=src, tgt_numa=tgt): (pid, src, tgt)
+                for pid, src, tgt in migrate_tasks
+            }
+            for future in as_completed(future_to_task):
+                pid, src, tgt = future_to_task[future]
                 try:
-                    utils.migrate_process_pages(pid=process.task_id, src_numa=src_numa, tgt_numa=tgt_numa)
-                except Exception as e:
-                    print(f"Failed to migrate pages for process [{process.task_id}]: {str(e)}")
+                    future.result()
+                    print(f"migrate pages of process [{pid}] from {src} to numa [{tgt}] SUCCESS")
+                except Exception as error:
+                    print(f"migrate pages of process [{pid}] from {src} to numa [{tgt}] FAILED: {error}")
 
     def print_affinity(self) -> None:
         """打印亲和任务中进程/线程当前实际的亲和信息"""

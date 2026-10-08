@@ -3,6 +3,7 @@ import os
 import re
 import psutil
 import subprocess
+from collections.abc import Callable
 from enum import Enum
 
 
@@ -312,11 +313,14 @@ def get_tid_by_thread_name(thread_name: str, pid: int | None, process_name: str 
 
 
 def get_pid_by_process_name(
-    process_name: str, exact_match: bool = True, parent_name: str | None = None
+    process_name: str,
+    exact_match: bool = True,
+    parent_name: str | None = None,
+    top_level: bool = False,
 ) -> list[tuple[int, str]]:
-    """根据进程名获取进程pid"""
-    matched_pids = []
+    """根据进程名获取进程pid，可只返回父进程不同名的顶层进程。"""
     pattern_compiled = re.compile(process_name)
+    matched_processes: list[tuple[int, str, int]] = []
 
     try:
         for proc in psutil.process_iter(["pid", "name", "ppid"]):
@@ -347,7 +351,7 @@ def get_pid_by_process_name(
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         continue
 
-                matched_pids.append((proc_pid, proc_name))
+                matched_processes.append((proc_pid, proc_name, proc_ppid or 0))
 
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
@@ -357,7 +361,11 @@ def get_pid_by_process_name(
     except Exception as e:
         print(f"Error: get pid fail - {e}")
 
-    return matched_pids
+    if not top_level:
+        return [(pid, name) for pid, name, _ in matched_processes]
+
+    matched_pids = {pid for pid, _, _ in matched_processes}
+    return [(pid, name) for pid, name, ppid in matched_processes if ppid not in matched_pids]
 
 
 def get_process_cpus_by_pid(pid: int) -> list:
@@ -680,6 +688,17 @@ def is_cpu_online(cpu_id: int) -> bool:
         return True
 
 
+def get_online_cpus() -> set[int]:
+    """读取系统在线 CPU 列表。"""
+    online_path = "/sys/devices/system/cpu/online"
+    try:
+        with open(online_path, "r") as online_file:
+            return set(parse_cpu_affinity_string(online_file.read().strip()))
+    except OSError as error:
+        print(f"Warning: read {online_path} failed - {error}")
+        return set()
+
+
 def get_value_from_lines(lines: list[str], key: str) -> str:
     for line in lines:
         line = " ".join(line.split())
@@ -739,3 +758,169 @@ def get_ascend_device_type() -> AscendDeviceType:
     if _ascend_device_type is None:
         _ascend_device_type = detect_ascend_device_type()
     return _ascend_device_type
+
+
+def drop_caches() -> bool:
+    """清理 Linux 页缓存，避免页缓存干扰后续内存迁移。"""
+    print("\nDropping page caches (echo 1 > /proc/sys/vm/drop_caches)...")
+    try:
+        with open("/proc/sys/vm/drop_caches", "w") as cache_file:
+            cache_file.write("1")
+        print("page caches dropped.")
+        return True
+    except PermissionError:
+        print("failed to drop caches: permission denied (need root).")
+        return False
+    except OSError as error:
+        print(f"failed to drop caches: {error}")
+        return False
+
+
+def get_npu_topo_cpu_affinity() -> dict[int, list[int]]:
+    """通过 npu-smi 获取 A5 NPU 对应的 CPU 亲和范围。"""
+    try:
+        output, _, return_code = execute_command(["npu-smi", "info", "-t", "topo"])
+    except Exception as error:
+        print(f"[Warning] execute npu-smi info -t topo failed: {error}")
+        return {}
+
+    if return_code != 0 or not output:
+        print("[Warning] npu-smi info -t topo command failed or returned empty.")
+        return {}
+    if get_ascend_device_type() != AscendDeviceType.A5:
+        print("[Error] get_npu_topo_cpu_affinity is only supported on A5 scenario.")
+        return {}
+    return _parse_npu_topo_output_a5(output)
+
+
+def _parse_npu_topo_output_a5(topo_output: str) -> dict[int, list[int]]:
+    """解析 A5 topo 输出中的 CPU Affinity 列。"""
+    lines = topo_output.strip().splitlines()
+    if len(lines) < 2:
+        print("[Warning] npu-smi topo output too short, cannot parse.")
+        return {}
+
+    affinity_column = lines[0].find("CPU Affinity")
+    if affinity_column == -1:
+        print("[Warning] 'CPU Affinity' column not found in npu-smi topo output.")
+        return {}
+
+    npu_cpu_affinity: dict[int, list[int]] = {}
+    for line in lines[1:]:
+        stripped_line = line.strip()
+        npu_match = re.match(r"NPU(\d+)", stripped_line)
+        if npu_match is None or len(stripped_line) <= affinity_column:
+            continue
+
+        affinity_text = stripped_line[affinity_column:].strip()
+        if ":" in affinity_text:
+            affinity_text = affinity_text.split(":", 1)[1].strip()
+        if not affinity_text or affinity_text in {"-", "X"}:
+            continue
+
+        cpu_list = parse_cpu_affinity_string(affinity_text)
+        if cpu_list:
+            npu_cpu_affinity[int(npu_match.group(1))] = cpu_list
+    return npu_cpu_affinity
+
+
+def get_npu_topo_process_id() -> dict[int, int]:
+    """通过 npu-smi 获取 NPU 与关联进程 PID 的映射。"""
+    try:
+        output, _, return_code = execute_command(["npu-smi", "info"])
+    except Exception as error:
+        print(f"[Warning] execute npu-smi info failed: {error}")
+        return {}
+
+    if return_code != 0 or not output:
+        print("[Warning] npu-smi info command failed or returned empty.")
+        return {}
+
+    npu_type = get_ascend_device_type()
+    if npu_type == AscendDeviceType.A5:
+        return _parse_npu_info_output_a5(output)
+    if npu_type == AscendDeviceType.A3:
+        return _parse_npu_info_output_a3(output)
+
+    print(f"[Error] get_npu_topo_process_id is only supported on A3/A5 scenario, current: {npu_type}")
+    return {}
+
+
+def _parse_npu_info_process_table(
+    info_output: str,
+    is_header_line: Callable[[str], bool],
+    parse_npu_id: Callable[[str, str], int | None],
+) -> dict[int, int]:
+    """解析 npu-smi 进程信息表。"""
+    lines = info_output.strip().splitlines()
+    section_start = next((index for index, line in enumerate(lines) if is_header_line(line)), -1)
+    if section_start == -1:
+        print("[Warning] 'Process id' column not found in npu-smi info output.")
+        return {}
+
+    header_line = lines[section_start]
+    process_column = header_line.find("Process id")
+    if process_column == -1:
+        print("[Warning] 'Process id' column position not found in header.")
+        return {}
+    next_separator = header_line.find("|", process_column)
+    process_column_end = len(header_line) if next_separator == -1 else next_separator
+
+    npu_to_pid: dict[int, int] = {}
+    for line in lines[section_start + 1:]:
+        stripped_line = line.strip()
+        if not stripped_line or not any(character.isdigit() for character in stripped_line):
+            continue
+
+        npu_id = parse_npu_id(header_line, stripped_line)
+        if npu_id is None or len(stripped_line) <= process_column:
+            continue
+
+        process_id_text = stripped_line[process_column:process_column_end].strip()
+        if not process_id_text or process_id_text == "NA":
+            continue
+        try:
+            npu_to_pid[npu_id] = int(process_id_text)
+        except ValueError:
+            continue
+    return npu_to_pid
+
+
+def _parse_npu_info_output_a5(info_output: str) -> dict[int, int]:
+    """解析 A5 NPU ID 与进程 PID。"""
+
+    def is_header(line: str) -> bool:
+        return "Process id" in line and "NPU ID" in line
+
+    def parse_npu_id(header_line: str, stripped_line: str) -> int | None:
+        npu_column = header_line.find("NPU ID")
+        next_separator = header_line.find("|", npu_column)
+        npu_column_end = len(header_line) if next_separator == -1 else next_separator
+        if len(stripped_line) <= npu_column:
+            return None
+        try:
+            return int(stripped_line[npu_column:npu_column_end].strip())
+        except ValueError:
+            return None
+
+    return _parse_npu_info_process_table(info_output, is_header, parse_npu_id)
+
+
+def _parse_npu_info_output_a3(info_output: str) -> dict[int, int]:
+    """解析 A3 卡号、Chip ID 与进程 PID。"""
+
+    def is_header(line: str) -> bool:
+        return "Process id" in line and "NPU" in line and "Chip" in line
+
+    def parse_npu_id(header_line: str, stripped_line: str) -> int | None:
+        chip_column = header_line.find("Chip")
+        if header_line.find("NPU") == -1 or chip_column == -1:
+            return None
+        next_separator = header_line.find("|", chip_column)
+        npu_chip_end = len(header_line) if next_separator == -1 else next_separator
+        numbers = re.findall(r"\d+", stripped_line[:npu_chip_end])
+        if len(numbers) < 2:
+            return None
+        return int(numbers[0]) * 2 + int(numbers[1])
+
+    return _parse_npu_info_process_table(info_output, is_header, parse_npu_id)

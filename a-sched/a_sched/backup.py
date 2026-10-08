@@ -29,6 +29,7 @@ class AffinityBackup:
             "background_bind_data": self.build_background_bind_data(),
             "irq_bind_data": self.build_irq_bind_data(),
             "irq_service_status": self.build_irq_service_status(),
+            "numa_balancing_status": self.build_numa_balancing_status(),
             "dev_sq_bind_data": self.build_dev_sq_bind_data(),
         }
 
@@ -79,6 +80,10 @@ class AffinityBackup:
     def build_irq_service_status(self) -> bool:
         _, _, ret = utils.execute_command(["systemctl", "is-active", "--quiet", "irqbalance"])
         return True if ret == 0 else False
+
+    def build_numa_balancing_status(self) -> bool:
+        stdout, _, return_code = utils.execute_command(["sysctl", "-n", "kernel.numa_balancing"])
+        return stdout.strip() == "1" if return_code == 0 else False
 
     def build_irq_bind_data(self) -> dict:
         irq_bind_data = {}
@@ -147,6 +152,7 @@ class AffinityBackup:
         self.restore_cpu_bind_data(saved_data.get("cpu_bind_data", {}))
         self.restore_irq_bind_data(saved_data.get("irq_bind_data", {}))
         self.restore_irq_service_status(saved_data.get("irq_service_status", False))
+        self.restore_numa_balancing_status(saved_data.get("numa_balancing_status", False))
         self.restore_dev_sq_bind_data(saved_data.get("dev_sq_bind_data", {}))
         self.restore_background_bind_data(saved_data.get("background_bind_data", {}))
 
@@ -197,8 +203,19 @@ class AffinityBackup:
 
     def restore_irq_service_status(self, should_start: bool) -> None:
         if should_start:
-            utils.execute_command(["systemctl", "start", "irqbalance"])
-            print("restore irqbalance service to active.")
+            _, stderr, return_code = utils.execute_command(["systemctl", "start", "irqbalance"])
+            if return_code == 0:
+                print("restore irqbalance service to active.")
+            else:
+                print(f"failed to restore irqbalance service: {stderr.strip()}")
+
+    def restore_numa_balancing_status(self, should_enable: bool) -> None:
+        if should_enable:
+            _, stderr, return_code = utils.execute_command(["sysctl", "-w", "kernel.numa_balancing=1"])
+            if return_code == 0:
+                print("restore kernel.numa_balancing to 1.")
+            else:
+                print(f"failed to restore kernel.numa_balancing to 1: {stderr.strip()}")
 
     def restore_irq_bind_data(self, irq_bind_data: dict) -> None:
         for irq_id, data in irq_bind_data.items():
